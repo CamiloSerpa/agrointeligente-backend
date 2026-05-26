@@ -1,0 +1,107 @@
+services:
+  # ─── BASE DE DATOS CENTRAL ───────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: agro_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-agro}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-agro_pass_dev}
+      POSTGRES_DB: ${DB_NAME:-agrointeligente}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-agro}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - agro_net
+
+  # ─── API REST (Node.js) — Capa de presentación ───
+  api:
+    build:
+      context: ./api-node
+      dockerfile: Dockerfile
+    container_name: agro_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-agro}
+      DB_PASSWORD: ${DB_PASSWORD:-agro_pass_dev}
+      DB_NAME: ${DB_NAME:-agrointeligente}
+      JWT_SECRET: ${JWT_SECRET:-cambia_este_secreto_en_produccion}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      PYTHON_ENGINE_URL: http://motor:8000
+      OPEN_METEO_URL: https://api.open-meteo.com/v1/forecast
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./api-node/src:/app/src:ro    # Hot reload en desarrollo
+    networks:
+      - agro_net
+
+  # ─── MOTOR DE ANÁLISIS (Python/FastAPI) ──────────
+  motor:
+    build:
+      context: ./motor-python
+      dockerfile: Dockerfile
+    container_name: agro_motor
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-agro}
+      DB_PASSWORD: ${DB_PASSWORD:-agro_pass_dev}
+      DB_NAME: ${DB_NAME:-agrointeligente}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./motor-python/app:/app/app:ro
+    networks:
+      - agro_net
+
+  # ─── GESTOR DE ALERTAS (Node.js — proceso) ───────
+  # Comparte la misma imagen que la API pero arranca otro script
+  alertas:
+    build:
+      context: ./api-node
+      dockerfile: Dockerfile
+    container_name: agro_alertas
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-agro}
+      DB_PASSWORD: ${DB_PASSWORD:-agro_pass_dev}
+      DB_NAME: ${DB_NAME:-agrointeligente}
+      OPEN_METEO_URL: https://api.open-meteo.com/v1/forecast
+      ALERTAS_INTERVAL_MS: ${ALERTAS_INTERVAL_MS:-1800000}   # 30 min por defecto
+    command: ["node", "src/workers/alertas-worker.js"]
+    volumes:
+      - ./api-node/src:/app/src:ro
+    networks:
+      - agro_net
+
+volumes:
+  postgres_data:
+
+networks:
+  agro_net:
+    driver: bridge
